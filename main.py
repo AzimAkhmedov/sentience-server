@@ -13,7 +13,7 @@ load_dotenv()
 
 # Access the environment variables
 SECRET_KEY = os.getenv("SECRET_KEY")
-DATABASE_URL = os.getenv("DB_URL")
+DATABASE_URL = 'postgresql://sentience app_owner:npg_sLSq6d5xloJB@ep-small-bird-a5datc6e-pooler.us-east-2.aws.neon.tech/sentience app?sslmode=require'
 
 
 # Secret key for JWT
@@ -81,13 +81,12 @@ def login(form_data: OAuth2PasswordRequestForm = Depends()):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.get("/private-route")
+@app.get("/me")
 def private_route(user: dict = Depends(get_current_user)):
     return {"message": "This is a protected route", "user": user}
 
-
 @app.get("/articles")
-def get_articles():
+def get_articles(user: dict = Depends(get_current_user)):
     try:
         with engine.connect() as conn:
             articles = conn.execute(text("SELECT * FROM articles")).fetchall()
@@ -96,7 +95,7 @@ def get_articles():
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/articles/{article_id}")
-def get_article(article_id: int):
+def get_article(article_id: int, user: dict = Depends(get_current_user)):
     try:
         with engine.connect() as conn:
             article = conn.execute(text("SELECT * FROM articles WHERE id = :id"), {"id": article_id}).fetchone()
@@ -107,7 +106,7 @@ def get_article(article_id: int):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/tests")  
-def get_tests():
+def get_tests(user: dict = Depends(get_current_user)):
     try:
         with engine.connect() as conn:
             tests = conn.execute(text("SELECT * FROM tests")).fetchall()
@@ -116,7 +115,7 @@ def get_tests():
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/tests/{test_id}") 
-def get_test(test_id: int):
+def get_test(test_id: int, user: dict = Depends(get_current_user)):
     try:
         with engine.connect() as conn:
             test = conn.execute(text("SELECT * FROM test_options WHERE id = :id"), {"id": test_id}).fetchone()
@@ -135,8 +134,47 @@ def get_tests_results(user: dict = Depends(get_current_user)):
             return {"results": [dict(result) for result in results]}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-@app.get("/public-route")
-def public_route():
-    return {"message": "This is a public route"}
 
 
+@app.get("/tests_results/{result_id}")
+def get_test_result(result_id: int, user: dict = Depends(get_current_user)):
+    try:
+        user_id = user["user_id"]
+        with engine.connect() as conn:
+            result = conn.execute(text("SELECT * FROM tests_results WHERE id = :id AND user_id = :user_id"),
+                                  {"id": result_id, "user_id": user_id}).fetchone()
+            if not result:
+                raise HTTPException(status_code=404, detail="Test result not found")
+            return {"result": dict(result)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    
+    
+    
+@app.post("/estimate-test/{test_id}")
+def estimate_test(test_id: int,answers: dict, user: dict = Depends(get_current_user)):
+    try:
+        user_id = user["user_id"]
+        with engine.connect() as conn:
+            test = conn.execute(text("SELECT * FROM test_options WHERE id = :id"), {"id": test_id}).fetchone()
+            test_options = conn.execute(text("SELECT * FROM test_options WHERE test_id = :test_id"), {"test_id": test_id}).fetchall()
+            if not test:
+                raise HTTPException(status_code=404, detail="Test not found")
+            
+            if not test_options:
+                raise HTTPException(status_code=404, detail="Test options not found")            
+             
+            result = {
+                "test_id": test_id,
+                "user_id": user_id,
+                "score": 85,  # TODO: calculate score
+                "created_at": datetime.utcnow()
+            }
+            
+            conn.execute(text("INSERT INTO tests_results (test_id, user_id, score, created_at) VALUES (:test_id, :user_id, :score, :created_at)"),
+                         {"test_id": test_id, "user_id": user_id, "score": result["score"], "created_at": result["created_at"]})
+            conn.commit()
+            
+            return {"message": "Test estimated successfully", "result": result}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
