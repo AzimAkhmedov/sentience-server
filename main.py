@@ -55,14 +55,16 @@ def get_current_user(token: str = Depends(oauth2_scheme)):
         raise HTTPException(status_code=401, detail="Invalid token")
 
 @app.post("/register")
-def register_user(username: str, password: str):
+def register_user(username: str, password: str, profile_pic: str, ):
     hashed_password = hash_password(password)
     try:
         with engine.connect() as conn:
-            conn.execute(text("INSERT INTO users (username, password) VALUES (:username, :password)"),
-                         {"username": username, "password": hashed_password})
+            conn.execute(text("INSERT INTO users (username, password, profile_img, created_at, role) VALUES (:username, :password, :profile_img, CURRENT_TIMESTAMP, 'user')"),
+                         {"username": username, "password": hashed_password, "profile_img": profile_pic})
             conn.commit()
-        return {"message": "User registered successfully"}
+            access_token = create_access_token({"sub": username})
+            
+            return {"message": "User registered successfully", "access_token": access_token}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -83,6 +85,58 @@ def login(form_data: OAuth2PasswordRequestForm = Depends()):
 def private_route(user: dict = Depends(get_current_user)):
     return {"message": "This is a protected route", "user": user}
 
+
+@app.get("/articles")
+def get_articles():
+    try:
+        with engine.connect() as conn:
+            articles = conn.execute(text("SELECT * FROM articles")).fetchall()
+            return {"articles": [dict(article) for article in articles]}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/articles/{article_id}")
+def get_article(article_id: int):
+    try:
+        with engine.connect() as conn:
+            article = conn.execute(text("SELECT * FROM articles WHERE id = :id"), {"id": article_id}).fetchone()
+            if not article:
+                raise HTTPException(status_code=404, detail="Article not found")
+            return {"article": dict(article)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/tests")  
+def get_tests():
+    try:
+        with engine.connect() as conn:
+            tests = conn.execute(text("SELECT * FROM tests")).fetchall()
+            return {"tests": [dict(test) for test in tests]}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/tests/{test_id}") 
+def get_test(test_id: int):
+    try:
+        with engine.connect() as conn:
+            test = conn.execute(text("SELECT * FROM test_options WHERE id = :id"), {"id": test_id}).fetchone()
+            if not test:
+                raise HTTPException(status_code=404, detail="Test not found")
+            return {"test": dict(test)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/tests_results")
+def get_tests_results(user: dict = Depends(get_current_user)):
+    try:
+        user_id = user["user_id"]
+        with engine.connect() as conn:
+            results = conn.execute(text("SELECT * FROM tests_results WHERE user_id = :user_id"), {"user_id": user_id}).fetchall()
+            return {"results": [dict(result) for result in results]}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 @app.get("/public-route")
 def public_route():
     return {"message": "This is a public route"}
+
+
