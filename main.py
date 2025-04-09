@@ -170,7 +170,6 @@ def estimate_test(test_id: int,answers: dict, user: dict = Depends(get_current_u
                 "score": 85,  # TODO: calculate score
                 "created_at": datetime.utcnow()
             }
-            
             conn.execute(text("INSERT INTO tests_results (test_id, user_id, score, created_at) VALUES (:test_id, :user_id, :score, :created_at)"),
                          {"test_id": test_id, "user_id": user_id, "score": result["score"], "created_at": result["created_at"]})
             conn.commit()
