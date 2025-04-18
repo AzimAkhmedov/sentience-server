@@ -8,6 +8,19 @@ from sqlalchemy.orm import sessionmaker
 from dotenv import load_dotenv
 import os
 
+
+import torch
+from transformers import AutoTokenizer, AutoModelForCausalLM
+
+# Auto-detect device
+device = "cuda" if torch.cuda.is_available() else "cpu"
+
+# Load tokenizer and model
+model_path = "./saved_therapist_model"
+tokenizer = AutoTokenizer.from_pretrained(model_path)
+model = AutoModelForCausalLM.from_pretrained(model_path)
+model.to(device)
+
 # Load the .env file
 load_dotenv()
 
@@ -15,6 +28,27 @@ load_dotenv()
 SECRET_KEY = os.getenv("SECRET_KEY")
 DATABASE_URL = 'postgresql://sentience app_owner:npg_sLSq6d5xloJB@ep-small-bird-a5datc6e-pooler.us-east-2.aws.neon.tech/sentience app?sslmode=require'
 
+from pydantic import BaseModel
+
+class PromptRequest(BaseModel):
+    prompt: str
+
+def get_response(prompt, temperature=0.7, top_p=0.9, max_length=150):
+    inputs = tokenizer(prompt, return_tensors="pt").to(device)
+    output = model.generate(
+        **inputs,
+        max_length=max_length,
+        temperature=temperature,
+        top_p=top_p,
+        do_sample=True,
+        pad_token_id=tokenizer.eos_token_id
+    )
+    
+    full_output = tokenizer.decode(output[0], skip_special_tokens=True)
+
+    if full_output.startswith(prompt):
+        return full_output[len(prompt):].strip()
+    return full_output.strip()
 
 # Secret key for JWT
 SECRET_KEY = "your_secret_key"
@@ -177,3 +211,15 @@ def estimate_test(test_id: int,answers: dict, user: dict = Depends(get_current_u
             return {"message": "Test estimated successfully", "result": result}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+    
+
+@app.post("/ask-ai")
+def ask_ai(request: PromptRequest, user: dict = Depends(get_current_user)):
+    try:
+        user_id = user["user_id"]
+        prompt = request.prompt
+        with engine.connect() as conn:
+            response = get_response(prompt)            
+            return {"response": response}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)) 
