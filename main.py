@@ -33,6 +33,15 @@ from pydantic import BaseModel
 class PromptRequest(BaseModel):
     prompt: str
 
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+class RegisterRequest(BaseModel):
+    username: str
+    password: str
+    profile_pic: str
+
 def get_response(prompt, temperature=0.7, top_p=0.9, max_length=150):
     inputs = tokenizer(prompt, return_tensors="pt").to(device)
     output = model.generate(
@@ -89,26 +98,26 @@ def get_current_user(token: str = Depends(oauth2_scheme)):
         raise HTTPException(status_code=401, detail="Invalid token")
 
 @app.post("/register")
-def register_user(username: str, password: str, profile_pic: str, ):
-    hashed_password = hash_password(password)
+def register_user(request: RegisterRequest):
+    hashed_password = hash_password(request.password)
     try:
         with engine.connect() as conn:
             conn.execute(text("INSERT INTO users (username, password, profile_img, created_at, role) VALUES (:username, :password, :profile_img, CURRENT_TIMESTAMP, 'user')"),
-                         {"username": username, "password": hashed_password, "profile_img": profile_pic})
+                         {"username": request.username, "password": hashed_password, "profile_img": request.profile_pic})
             conn.commit()
-            access_token = create_access_token({"sub": username})
+            access_token = create_access_token({"sub": request.username})
             
             return {"message": "User registered successfully", "access_token": access_token}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/login")
-def login(form_data: OAuth2PasswordRequestForm = Depends()):
+def login(request: LoginRequest):
     try:
         with engine.connect() as conn:
             user = conn.execute(text("SELECT * FROM users WHERE username = :username"),
-                                {"username": form_data.username}).fetchone()
-            if not user or not verify_password(form_data.password, user.password):
+                                {"username": request.username}).fetchone()
+            if not user or not verify_password(request.password, user.password):
                 raise HTTPException(status_code=400, detail="Invalid username or password")
             access_token = create_access_token({"sub": user.username})
             return {"access_token": access_token, "token_type": "bearer"}
