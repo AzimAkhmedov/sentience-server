@@ -4,8 +4,9 @@ from passlib.context import CryptContext
 from datetime import datetime, timedelta
 from jose import JWTError, jwt
 from sqlalchemy import create_engine, text
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.orm import sessionmaker, Session
 from dotenv import load_dotenv
+from typing import Dict
 import os
 
 
@@ -29,6 +30,7 @@ SECRET_KEY = os.getenv("SECRET_KEY")
 DATABASE_URL = 'postgresql://sentience app_owner:npg_sLSq6d5xloJB@ep-small-bird-a5datc6e-pooler.us-east-2.aws.neon.tech/sentience app?sslmode=require'
 
 from pydantic import BaseModel
+
 
 class PromptRequest(BaseModel):
     prompt: str
@@ -68,6 +70,14 @@ ACCESS_TOKEN_EXPIRE_MINUTES = 30
 engine = create_engine(DATABASE_URL, pool_size=10, max_overflow=20)
 SessionLocal = sessionmaker(bind=engine)
 
+
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+        
 # FastAPI app
 app = FastAPI()
 
@@ -148,79 +158,100 @@ def get_article(article_id: int, user: dict = Depends(get_current_user)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.get("/tests")  
-def get_tests(user: dict = Depends(get_current_user)):
+@app.get("/tests")
+def get_tests(user: dict = Depends(get_current_user), db: Session = Depends(get_db)):
     try:
-        with engine.connect() as conn:
-            tests = conn.execute(text("SELECT * FROM tests")).fetchall()
-            return {"tests": [dict(test) for test in tests]}
+        tests = db.execute(text("SELECT * FROM tests")).fetchall()
+        return {"tests": [dict(test) for test in tests]}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.get("/tests/{test_id}") 
-def get_test(test_id: int, user: dict = Depends(get_current_user)):
+@app.get("/tests/{test_id}")
+def get_test(test_id: int, user: dict = Depends(get_current_user), db: Session = Depends(get_db)):
     try:
-        with engine.connect() as conn:
-            test = conn.execute(text("SELECT * FROM test_options WHERE id = :id"), {"id": test_id}).fetchone()
-            if not test:
-                raise HTTPException(status_code=404, detail="Test not found")
-            return {"test": dict(test)}
+        # Получаем информацию о тесте
+        test = db.execute(text("SELECT * FROM tests WHERE id = :id"), {"id": test_id}).fetchone()
+        if not test:
+            raise HTTPException(status_code=404, detail="Test not found")
+        
+        # Получаем вопросы для этого теста
+        questions = db.execute(text("SELECT * FROM questions WHERE test_id = :test_id ORDER BY order_number"), {"test_id": test_id}).fetchall()
+        
+        # Получаем варианты ответов для каждого вопроса
+        questions_with_options = []
+        for question in questions:
+            options = db.execute(text("SELECT * FROM test_options WHERE question_id = :question_id"), {"question_id": question["id"]}).fetchall()
+            questions_with_options.append({
+                "question": dict(question),
+                "options": [dict(option) for option in options]
+            })
+        
+        return {"test": dict(test), "questions": questions_with_options}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/tests_results")
-def get_tests_results(user: dict = Depends(get_current_user)):
+def get_tests_results(user: dict = Depends(get_current_user), db: Session = Depends(get_db)):
     try:
         user_id = user["user_id"]
-        with engine.connect() as conn:
-            results = conn.execute(text("SELECT * FROM tests_results WHERE user_id = :user_id"), {"user_id": user_id}).fetchall()
-            return {"results": [dict(result) for result in results]}
+        results = db.execute(text("SELECT * FROM tests_results WHERE user_id = :user_id"), {"user_id": user_id}).fetchall()
+        return {"results": [dict(result) for result in results]}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-
 
 @app.get("/tests_results/{result_id}")
-def get_test_result(result_id: int, user: dict = Depends(get_current_user)):
+def get_test_result(result_id: int, user: dict = Depends(get_current_user), db: Session = Depends(get_db)):
     try:
         user_id = user["user_id"]
-        with engine.connect() as conn:
-            result = conn.execute(text("SELECT * FROM tests_results WHERE id = :id AND user_id = :user_id"),
-                                  {"id": result_id, "user_id": user_id}).fetchone()
-            if not result:
-                raise HTTPException(status_code=404, detail="Test result not found")
-            return {"result": dict(result)}
+        result = db.execute(text("SELECT * FROM tests_results WHERE id = :id AND user_id = :user_id"),
+                            {"id": result_id, "user_id": user_id}).fetchone()
+        if not result:
+            raise HTTPException(status_code=404, detail="Test result not found")
+        return {"result": dict(result)}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-    
-    
-    
+
 @app.post("/estimate-test/{test_id}")
-def estimate_test(test_id: int,answers: dict, user: dict = Depends(get_current_user)):
+def estimate_test(test_id: int, answers: Dict[int, int], user: dict = Depends(get_current_user), db: Session = Depends(get_db)):
     try:
         user_id = user["user_id"]
-        with engine.connect() as conn:
-            test = conn.execute(text("SELECT * FROM test_options WHERE id = :id"), {"id": test_id}).fetchone()
-            test_options = conn.execute(text("SELECT * FROM test_options WHERE test_id = :test_id"), {"test_id": test_id}).fetchall()
-            if not test:
-                raise HTTPException(status_code=404, detail="Test not found")
+        
+        # Получаем тест по ID
+        test = db.execute(text("SELECT * FROM tests WHERE id = :id"), {"id": test_id}).fetchone()
+        if not test:
+            raise HTTPException(status_code=404, detail="Test not found")
+        
+        # Получаем вопросы для этого теста
+        questions = db.execute(text("SELECT * FROM questions WHERE test_id = :test_id ORDER BY order_number"), {"test_id": test_id}).fetchall()
+        
+        # Подсчитываем правильные ответы
+        score = 0
+        for question in questions:
+            options = db.execute(text("SELECT * FROM test_options WHERE question_id = :question_id"), {"question_id": question["id"]}).fetchall()
+            correct_option = next((opt for opt in options if opt["is_correct"] == True), None)
             
-            if not test_options:
-                raise HTTPException(status_code=404, detail="Test options not found")            
-             
-            result = {
-                "test_id": test_id,
-                "user_id": user_id,
-                "score": 85,  # TODO: calculate score
-                "created_at": datetime.utcnow()
-            }
-            conn.execute(text("INSERT INTO tests_results (test_id, user_id, score, created_at) VALUES (:test_id, :user_id, :score, :created_at)"),
-                         {"test_id": test_id, "user_id": user_id, "score": result["score"], "created_at": result["created_at"]})
-            conn.commit()
-            
-            return {"message": "Test estimated successfully", "result": result}
+            # Проверяем, совпадает ли ответ с правильным
+            if correct_option and answers.get(question["id"]) == correct_option["id"]:
+                score += 1
+        
+        # Сохраняем результаты теста в таблицу tests_results
+        result = {
+            "test_id": test_id,
+            "user_id": user_id,
+            "score": score,
+            "created_at": datetime.utcnow()
+        }
+        
+        db.execute(text("""
+            INSERT INTO tests_results (test_id, user_id, score, created_at)
+            VALUES (:test_id, :user_id, :score, :created_at)
+        """), {"test_id": test_id, "user_id": user_id, "score": result["score"], "created_at": result["created_at"]})
+        db.commit()
+        
+        return {"message": "Test estimated successfully", "result": result}
     except Exception as e:
+        db.rollback()
         raise HTTPException(status_code=500, detail=str(e))
-    
 
 @app.post("/ask-ai")
 def ask_ai(request: PromptRequest, user: dict = Depends(get_current_user)):
