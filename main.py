@@ -143,10 +143,17 @@ def get_articles(user: dict = Depends(get_current_user)):
     try:
         with engine.connect() as conn:
             articles = conn.execute(text("SELECT * FROM articles")).fetchall()
-            return {"articles": [dict(article) for article in articles]}
+            columns = ["id", "title", "body", "created_at", "author"]
+
+            return {
+                "articles": [
+                    dict(zip(columns, article)) 
+                    for article in articles
+                ]
+            }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-
+    
 @app.get("/articles/{article_id}")
 def get_article(article_id: int, user: dict = Depends(get_current_user)):
     try:
@@ -162,10 +169,16 @@ def get_article(article_id: int, user: dict = Depends(get_current_user)):
 def get_tests(user: dict = Depends(get_current_user), db: Session = Depends(get_db)):
     try:
         tests = db.execute(text("SELECT * FROM tests")).fetchall()
-        return {"tests": [dict(test) for test in tests]}
+        columns = ['id', 'title', 'description', 'created_at']
+        print(tests[0])
+        return {
+                "tests": [
+                    dict(zip(columns, test)) 
+                    for test in tests
+                ]
+            }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-
 @app.get("/tests/{test_id}")
 def get_test(test_id: int, user: dict = Depends(get_current_user), db: Session = Depends(get_db)):
     try:
@@ -180,16 +193,29 @@ def get_test(test_id: int, user: dict = Depends(get_current_user), db: Session =
         # Получаем варианты ответов для каждого вопроса
         questions_with_options = []
         for question in questions:
-            options = db.execute(text("SELECT * FROM test_options WHERE question_id = :question_id"), {"question_id": question["id"]}).fetchall()
+            options = db.execute(text("SELECT * FROM answers WHERE question_id = :question_id"), {"question_id": question[0]}).fetchall()  # Используем индекс 0 для обращения к ID вопроса
             questions_with_options.append({
-                "question": dict(question),
-                "options": [dict(option) for option in options]
+                "question": {
+                    "id": question[0],
+                    "test_id": question[1],
+                    "text": question[2],
+                    "order_number": question[3]
+                },
+                "options": [
+                    {"id": option[0], "question_id": option[1], "option_text": option[2]}
+                    for option in options
+                ]
             })
         
-        return {"test": dict(test), "questions": questions_with_options}
+        return {"test": {
+            "id": test[0],
+            "title": test[1],
+            "description": test[2]
+        }, "questions": questions_with_options}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-
+    
+    
 @app.get("/tests_results")
 def get_tests_results(user: dict = Depends(get_current_user), db: Session = Depends(get_db)):
     try:
