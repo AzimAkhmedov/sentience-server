@@ -25,8 +25,8 @@ model.to(device)
 load_dotenv()
 
 # Access the environment variables
-SECRET_KEY = os.getenv("SECRET_KEY")
-DATABASE_URL = 'postgresql://sentience app_owner:npg_sLSq6d5xloJB@ep-small-bird-a5datc6e-pooler.us-east-2.aws.neon.tech/sentience app?sslmode=require'
+SECRET_KEY = os.getenv("SECRET_KEY", "your_secret_key")  # Fallback key for development
+DATABASE_URL = os.getenv("DATABASE_URL", 'postgresql://sentience app_owner:npg_sLSq6d5xloJB@ep-small-bird-a5datc6e-pooler.us-east-2.aws.neon.tech/sentience app?sslmode=require')
 
 from pydantic import BaseModel
 
@@ -60,12 +60,39 @@ def get_response(prompt, temperature=0.7, top_p=0.9, max_length=150):
     return full_output.strip()
 
 # Secret key for JWT
-SECRET_KEY = "your_secret_key"
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 30
 
-# Database URL
-engine = create_engine(DATABASE_URL, pool_size=10, max_overflow=20)
+# Create database engine with connection pooling and better error handling
+engine = create_engine(
+    DATABASE_URL,
+    pool_pre_ping=True,  # Enable connection health checks
+    pool_size=5,  # Set a reasonable pool size
+    max_overflow=10,  # Allow some overflow connections
+    pool_timeout=30,  # Timeout for getting a connection from the pool
+    pool_recycle=1800  # Recycle connections after 30 minutes
+)
+
+# Create tables if they don't exist
+with engine.connect() as conn:
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS tests (
+            id SERIAL PRIMARY KEY,
+            title TEXT NOT NULL,
+            description TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """))
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS test_options (
+            id SERIAL PRIMARY KEY,
+            test_id INTEGER REFERENCES tests(id),
+            option_text TEXT NOT NULL,
+            score INTEGER NOT NULL
+        )
+    """))
+    conn.commit()
+
 SessionLocal = sessionmaker(bind=engine)
 
 # FastAPI app
@@ -77,9 +104,13 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/login")
 
 def create_access_token(data: dict, expires_delta: timedelta | None = None):
     to_encode = data.copy()
-    expire = datetime.utcnow() + (expires_delta or timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES))
+    if expires_delta:
+        expire = datetime.utcnow() + expires_delta
+    else:
+        expire = datetime.utcnow() + timedelta(minutes=15)
     to_encode.update({"exp": expire})
-    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+    encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+    return encoded_jwt
 
 def verify_password(plain_password, hashed_password):
     return pwd_context.verify(plain_password, hashed_password)
@@ -88,14 +119,29 @@ def hash_password(password):
     return pwd_context.hash(password)
 
 def get_current_user(token: str = Depends(oauth2_scheme)):
+    credentials_exception = HTTPException(
+        status_code=401,
+        detail="Could not validate credentials",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
     try:
+        # Strip "Bearer " prefix if present
+        if token.startswith("Bearer "):
+            token = token[7:]
+            
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         user_id: str = payload.get("sub")
         if user_id is None:
-            raise HTTPException(status_code=401, detail="Invalid token")
+            raise credentials_exception
         return {"user_id": user_id}
-    except JWTError:
-        raise HTTPException(status_code=401, detail="Invalid token")
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(
+            status_code=401,
+            detail="Token has expired",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    except jwt.JWTError:
+        raise credentials_exception
 
 @app.post("/register")
 def register_user(request: RegisterRequest):
@@ -133,7 +179,8 @@ def get_articles(user: dict = Depends(get_current_user)):
     try:
         with engine.connect() as conn:
             articles = conn.execute(text("SELECT * FROM articles")).fetchall()
-            return {"articles": [dict(article) for article in articles]}
+            # Convert each row to a dictionary and return as a list
+            return [dict(row._mapping) for row in articles]
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -148,23 +195,37 @@ def get_article(article_id: int, user: dict = Depends(get_current_user)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.get("/tests")  
+@app.get("/tests")
 def get_tests(user: dict = Depends(get_current_user)):
     try:
         with engine.connect() as conn:
-            tests = conn.execute(text("SELECT * FROM tests")).fetchall()
-            return {"tests": [dict(test) for test in tests]}
+            tests = conn.execute(text("""
+                SELECT t.*, json_agg(test_options.*) as options 
+                FROM tests t
+                LEFT JOIN test_options ON t.id = test_options.test_id
+                GROUP BY t.id
+            """)).fetchall()
+            # Convert each row to a dictionary and return as a list
+            return [dict(row._mapping) for row in tests]
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.get("/tests/{test_id}") 
+@app.get("/tests/{test_id}")
 def get_test(test_id: int, user: dict = Depends(get_current_user)):
     try:
         with engine.connect() as conn:
-            test = conn.execute(text("SELECT * FROM test_options WHERE id = :id"), {"id": test_id}).fetchone()
+            test = conn.execute(text("""
+                SELECT t.*, json_agg(test_options.*) as options 
+                FROM tests t
+                LEFT JOIN test_options ON t.id = test_options.test_id
+                WHERE t.id = :test_id
+                GROUP BY t.id
+            """), {"test_id": test_id}).fetchone()
+            
             if not test:
                 raise HTTPException(status_code=404, detail="Test not found")
-            return {"test": dict(test)}
+            
+            return dict(test._mapping)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
