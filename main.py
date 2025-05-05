@@ -1,6 +1,8 @@
 from fastapi import FastAPI, HTTPException, Depends, Request
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from passlib.context import CryptContext
+from pydantic import BaseModel, validator
+
 from datetime import datetime, timedelta
 from jose import JWTError, jwt
 from sqlalchemy import create_engine, text
@@ -43,6 +45,15 @@ class RegisterRequest(BaseModel):
     username: str
     password: str
     profile_pic: str
+    
+
+class EstimateTestRequest(BaseModel):
+    answers: Dict[str, int]  # Входные данные приходят как строковые ключи
+
+
+    @validator('answers')
+    def convert_keys_to_int(cls, v):
+        return {int(key): value for key, value in v.items()}  # Преоб
 
 def get_response(prompt, temperature=0.7, top_p=0.9, max_length=150):
     inputs = tokenizer(prompt, return_tensors="pt").to(device)
@@ -190,7 +201,13 @@ def get_articles(user: dict = Depends(get_current_user)):
         with engine.connect() as conn:
             articles = conn.execute(text("SELECT * FROM articles")).fetchall()
             # Convert each row to a dictionary and return as a list
-            return [dict(row._mapping) for row in articles]
+            columns = ["id", "title", "body", "created_at", "author"]
+            return {
+                "articles": [
+                    dict(zip(columns, article)) 
+                    for article in articles
+                ]
+            }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
     
@@ -198,44 +215,68 @@ def get_articles(user: dict = Depends(get_current_user)):
 def get_article(article_id: int, user: dict = Depends(get_current_user)):
     try:
         with engine.connect() as conn:
-            article = conn.execute(text("SELECT * FROM articles WHERE id = :id"), {"id": article_id}).fetchone()
+            articles = conn.execute(text("SELECT * FROM articles WHERE id = :id"), {"id": article_id}).fetchone()
             if not article:
                 raise HTTPException(status_code=404, detail="Article not found")
-            return {"article": dict(article)}
+            columns = ["id", "title", "body", "created_at", "author"]
+
+            return {
+                "articles": [
+                    dict(zip(columns, article)) 
+                    for article in articles
+                ]
+            }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/tests")
-def get_tests(user: dict = Depends(get_current_user)):
+def get_tests(user: dict = Depends(get_current_user), db: Session = Depends(get_db)):
     try:
-        with engine.connect() as conn:
-            tests = conn.execute(text("""
-                SELECT t.*, json_agg(test_options.*) as options 
-                FROM tests t
-                LEFT JOIN test_options ON t.id = test_options.test_id
-                GROUP BY t.id
-            """)).fetchall()
-            # Convert each row to a dictionary and return as a list
-            return [dict(row._mapping) for row in tests]
+        tests = db.execute(text("SELECT * FROM tests")).fetchall()
+        columns = ['id', 'title', 'description', 'created_at']
+        print(tests[0])
+        return {
+                "tests": [
+                    dict(zip(columns, test)) 
+                    for test in tests
+                ]
+            }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/tests/{test_id}")
-def get_test(test_id: int, user: dict = Depends(get_current_user)):
+def get_test(test_id: int, user: dict = Depends(get_current_user), db: Session = Depends(get_db)):
     try:
-        with engine.connect() as conn:
-            test = conn.execute(text("""
-                SELECT t.*, json_agg(test_options.*) as options 
-                FROM tests t
-                LEFT JOIN test_options ON t.id = test_options.test_id
-                WHERE t.id = :test_id
-                GROUP BY t.id
-            """), {"test_id": test_id}).fetchone()
-            
-            if not test:
-                raise HTTPException(status_code=404, detail="Test not found")
-            
-            return dict(test._mapping)
+           # Получаем информацию о тесте
+        test = db.execute(text("SELECT * FROM tests WHERE id = :id"), {"id": test_id}).fetchone()
+        if not test:
+            raise HTTPException(status_code=404, detail="Test not found")
+        
+        # Получаем вопросы для этого теста
+        questions = db.execute(text("SELECT * FROM questions WHERE test_id = :test_id ORDER BY order_number"), {"test_id": test_id}).fetchall()
+        
+        # Получаем варианты ответов для каждого вопроса
+        questions_with_options = []
+        for question in questions:
+            options = db.execute(text("SELECT * FROM answers WHERE question_id = :question_id"), {"question_id": question[0]}).fetchall()  # Используем индекс 0 для обращения к ID вопроса
+            questions_with_options.append({
+                "question": {
+                    "id": question[0],
+                    "test_id": question[1],
+                    "text": question[2],
+                    "order_number": question[3]
+                },
+                "options": [
+                    {"id": option[0], "question_id": option[1], "option_text": option[2]}
+                    for option in options
+                ]
+            })
+        
+        return {"test": {
+            "id": test[0],
+            "title": test[1],
+            "description": test[2]
+        }, "questions": questions_with_options}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
     
@@ -270,11 +311,23 @@ def get_test_result(result_id: int, user: dict = Depends(get_current_user), db: 
         return {"result": dict(result)}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-
 @app.post("/estimate-test/{test_id}")
-def estimate_test(test_id: int, answers: Dict[int, int], user: dict = Depends(get_current_user), db: Session = Depends(get_db)):
+def estimate_test(
+    test_id: int,
+    request: EstimateTestRequest,
+    user: dict = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
     try:
-        user_id = user["user_id"]
+        # Преобразованные данные уже находятся в request.answers
+        answers = request.answers
+        print(f"Test ID: {test_id}, Answers: {answers}")
+        
+        username= user["user_id"]
+        
+        user = db.execute(text("SELECT * FROM users WHERE username = :username"), {"username": username}).fetchone()
+        
+        user_id = user[0] 
         
         # Получаем тест по ID
         test = db.execute(text("SELECT * FROM tests WHERE id = :id"), {"id": test_id}).fetchone()
@@ -282,16 +335,26 @@ def estimate_test(test_id: int, answers: Dict[int, int], user: dict = Depends(ge
             raise HTTPException(status_code=404, detail="Test not found")
         
         # Получаем вопросы для этого теста
-        questions = db.execute(text("SELECT * FROM questions WHERE test_id = :test_id ORDER BY order_number"), {"test_id": test_id}).fetchall()
-        
+        questions = db.execute(
+            text("SELECT * FROM questions WHERE test_id = :test_id ORDER BY order_number"), 
+            {"test_id": test_id}
+        ).fetchall()
+
         # Подсчитываем правильные ответы
         score = 0
         for question in questions:
-            options = db.execute(text("SELECT * FROM test_options WHERE question_id = :question_id"), {"question_id": question["id"]}).fetchall()
-            correct_option = next((opt for opt in options if opt["is_correct"] == True), None)
+            # Доступ через индексы к кортежу
+            question_id = question[0]  # Вопрос имеет индекс 0 в кортеже, если это SELECT *
+            
+            options = db.execute(
+                text("SELECT * FROM answers WHERE question_id = :question_id"), 
+                {"question_id": question_id}
+            ).fetchall()
+            
+            correct_option = next((opt for opt in options if opt[2] == True), None)  # opt[2] — индекс для is_correct
             
             # Проверяем, совпадает ли ответ с правильным
-            if correct_option and answers.get(question["id"]) == correct_option["id"]:
+            if correct_option and answers.get(question_id) == correct_option[0]:  # correct_option[0] — это ID правильного ответа
                 score += 1
         
         # Сохраняем результаты теста в таблицу tests_results
@@ -303,16 +366,15 @@ def estimate_test(test_id: int, answers: Dict[int, int], user: dict = Depends(ge
         }
         
         db.execute(text("""
-            INSERT INTO tests_results (test_id, user_id, score, created_at)
-            VALUES (:test_id, :user_id, :score, :created_at)
-        """), {"test_id": test_id, "user_id": user_id, "score": result["score"], "created_at": result["created_at"]})
+            INSERT INTO user_results (test_id, user_id, total_score, created_at)
+            VALUES (:test_id, :user_id, :total_score, :created_at)
+        """), {"test_id": test_id, "user_id": user_id, "total_score": result["score"], "created_at": result["created_at"]})
         db.commit()
         
         return {"message": "Test estimated successfully", "result": result}
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=str(e))
-
 @app.post("/ask-ai")
 def ask_ai(request: PromptRequest, user: dict = Depends(get_current_user)):
     try:
