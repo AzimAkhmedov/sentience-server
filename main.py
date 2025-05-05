@@ -243,9 +243,19 @@ def get_test(test_id: int, user: dict = Depends(get_current_user)):
 @app.get("/tests_results")
 def get_tests_results(user: dict = Depends(get_current_user), db: Session = Depends(get_db)):
     try:
-        user_id = user["user_id"]
-        results = db.execute(text("SELECT * FROM tests_results WHERE user_id = :user_id"), {"user_id": user_id}).fetchall()
-        return {"results": [dict(result) for result in results]}
+        username = user["user_id"]
+        db_user=  db.execute(text("SELECT * FROM users WHERE username = :username"), {"username": username}).fetchone()
+        print(db_user)
+        user_id = db_user[0]
+        print(user_id)
+        results = db.execute(text("SELECT * FROM user_results WHERE user_id = :user_id"), {"user_id": user_id}).fetchall()
+        cols = ['id', 'user_id', 'test_id', 'total_score','result_text', 'created_at']
+        print(results)
+        
+                    # dict(zip(columns, test)) 
+                    # for test in tests
+        
+        return {"results": [dict(zip(cols,result)) for result in results]}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
