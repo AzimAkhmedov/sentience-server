@@ -11,25 +11,45 @@ from dotenv import load_dotenv
 from typing import Dict
 import os
 
+from groq import Groq
+
+client = Groq(
+    api_key="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",
+)
+
+def get_response(promt):
+    
+    chat_completion = client.chat.completions.create(
+        messages=[
+            {
+                "role": "system",
+                "content": "You are professional therapist, please be patient and help people"
+            },
+            {
+                "role": "user",
+                "content": promt
+            }
+        ],
+        model="llama-3.3-70b-versatile", 
+    )
+       
+    return chat_completion.choices[0].message.content
 
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM
 
-# Auto-detect device
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
-# Load tokenizer and model
 model_path = "./saved_therapist_model"
 tokenizer = AutoTokenizer.from_pretrained(model_path)
 model = AutoModelForCausalLM.from_pretrained(model_path)
 model.to(device)
 
-# Load the .env file
 load_dotenv()
 
-# Access the environment variables
 SECRET_KEY = os.getenv("SECRET_KEY", "your_secret_key")  # Fallback key for development
 DATABASE_URL = os.getenv("DATABASE_URL", 'postgresql://sentience app_owner:npg_sLSq6d5xloJB@ep-small-bird-a5datc6e-pooler.us-east-2.aws.neon.tech/sentience app?sslmode=require')
+GROK_API_KEY = os.getenv("GROK_API_KEY", "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")
 
 from pydantic import BaseModel
 
@@ -48,45 +68,47 @@ class RegisterRequest(BaseModel):
     
 
 class EstimateTestRequest(BaseModel):
-    answers: Dict[str, int]  # Входные данные приходят как строковые ключи
-
-
+    answers: Dict[str, int]
     @validator('answers')
     def convert_keys_to_int(cls, v):
-        return {int(key): value for key, value in v.items()}  # Преоб
+        return {int(key): value for key, value in v.items()}
 
-def get_response(prompt, temperature=0.7, top_p=0.9, max_length=150):
-    inputs = tokenizer(prompt, return_tensors="pt").to(device)
-    output = model.generate(
-        **inputs,
-        max_length=max_length,
-        temperature=temperature,
-        top_p=top_p,
-        do_sample=True,
-        pad_token_id=tokenizer.eos_token_id
-    )
+# def get_response(prompt, temperature=0.7, top_p=0.9, max_length=150):
     
-    full_output = tokenizer.decode(output[0], skip_special_tokens=True)
+#     if prompt in greeting:
+#         return "Hello, I am Sentience. How you feeling?"
+    
+    
+#     inputs = tokenizer(prompt, return_tensors="pt").to(device)
+#     output = model.generate(
+#         **inputs,
+#         max_length=max_length,
+#         temperature=temperature,
+#         top_p=top_p,
+#         do_sample=True,
+#         pad_token_id=tokenizer.eos_token_id
+#     )
+    
+#     full_output = tokenizer.decode(output[0], skip_special_tokens=True)
 
-    if full_output.startswith(prompt):
-        return full_output[len(prompt):].strip()
-    return full_output.strip()
+#     if full_output.startswith(prompt):
+#         return full_output[len(prompt):].strip()
+#     return full_output.strip()
+
 
 # Secret key for JWT
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 30
 
-# Create database engine with connection pooling and better error handling
 engine = create_engine(
     DATABASE_URL,
-    pool_pre_ping=True,  # Enable connection health checks
-    pool_size=5,  # Set a reasonable pool size
-    max_overflow=10,  # Allow some overflow connections
-    pool_timeout=30,  # Timeout for getting a connection from the pool
-    pool_recycle=1800  # Recycle connections after 30 minutes
+    pool_pre_ping=True,
+    pool_size=5,
+    max_overflow=10,
+    pool_timeout=30,
+    pool_recycle=1800 
 )
 
-# Create tables if they don't exist
 with engine.connect() as conn:
     conn.execute(text("""
         CREATE TABLE IF NOT EXISTS tests (
@@ -116,10 +138,8 @@ def get_db():
     finally:
         db.close()
         
-# FastAPI app
 app = FastAPI()
 
-# Security
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/login")
 
@@ -146,7 +166,6 @@ def get_current_user(token: str = Depends(oauth2_scheme)):
         headers={"WWW-Authenticate": "Bearer"},
     )
     try:
-        # Strip "Bearer " prefix if present
         if token.startswith("Bearer "):
             token = token[7:]
             
@@ -286,15 +305,9 @@ def get_tests_results(user: dict = Depends(get_current_user), db: Session = Depe
     try:
         username = user["user_id"]
         db_user=  db.execute(text("SELECT * FROM users WHERE username = :username"), {"username": username}).fetchone()
-        print(db_user)
         user_id = db_user[0]
-        print(user_id)
         results = db.execute(text("SELECT * FROM user_results WHERE user_id = :user_id"), {"user_id": user_id}).fetchall()
         cols = ['id', 'user_id', 'test_id', 'total_score','result_text', 'created_at']
-        print(results)
-        
-                    # dict(zip(columns, test)) 
-                    # for test in tests
         
         return {"results": [dict(zip(cols,result)) for result in results]}
     except Exception as e:
@@ -343,8 +356,8 @@ def estimate_test(
         # Подсчитываем правильные ответы
         score = 0
         for question in questions:
-            # Доступ через индексы к кортежу
-            question_id = question[0]  # Вопрос имеет индекс 0 в кортеже, если это SELECT *
+
+            question_id = question[0] 
             
             options = db.execute(
                 text("SELECT * FROM answers WHERE question_id = :question_id"), 
@@ -381,7 +394,10 @@ def ask_ai(request: PromptRequest, user: dict = Depends(get_current_user)):
         user_id = user["user_id"]
         prompt = request.prompt
         with engine.connect() as conn:
-            response = get_response(prompt)            
+            print("Prompt:", prompt)
+            response = get_response(prompt)     
+            
+            print(response)       
             return {"response": response}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e)) 
