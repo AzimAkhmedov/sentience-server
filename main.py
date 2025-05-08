@@ -17,19 +17,23 @@ client = Groq(
     api_key="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",
 )
 
-def get_response(promt):
+def get_response(promts):
+    
+    messages = [
+        {
+            "role": "system",
+            "content": "You are professional therapist, please be patient and help people. Your name is Sentience. No need to introduce yourself if customer wont ask. Answer the questions as a therapist."
+        }
+    ]    
+    
+    for prompt in promts:
+        messages.append({
+            "role": "user",
+            "content": prompt
+        })
     
     chat_completion = client.chat.completions.create(
-        messages=[
-            {
-                "role": "system",
-                "content": "You are professional therapist, please be patient and help people"
-            },
-            {
-                "role": "user",
-                "content": promt
-            }
-        ],
+        messages=messages,
         model="llama-3.3-70b-versatile", 
     )
        
@@ -364,24 +368,41 @@ def estimate_test(
                 {"question_id": question_id}
             ).fetchall()
             
-            correct_option = next((opt for opt in options if opt[2] == True), None)  # opt[2] — индекс для is_correct
-            
-            # Проверяем, совпадает ли ответ с правильным
-            if correct_option and answers.get(question_id) == correct_option[0]:  # correct_option[0] — это ID правильного ответа
-                score += 1
+            print(f"Question ID: {question_id}, Options: {options}")
+            print(f"Answers: {answers[question_id]}")
+            for option in options:
+                if option[0] == answers[question_id]:
+                    score += option[3]*10
+
         
+        
+        print(f"Score: {score}")
+        result_text = ""
+        if score >=90 :
+                result_text = "Results says that you need consulting with therapist"
+        elif score >= 70:
+                result_text = "Looks like everything is ok, but you need to be more careful"
+        elif score >= 50:
+                result_text = "You are fine"
+        elif score >= 30:
+                result_text = "Very small chance that you have problems"
+        elif score >= 10:
+                result_text = "Very small chance that you have problems"
+
+                     
         # Сохраняем результаты теста в таблицу tests_results
         result = {
             "test_id": test_id,
             "user_id": user_id,
             "score": score,
-            "created_at": datetime.utcnow()
+            "created_at": datetime.utcnow(),
+            "result_text": result_text
         }
         
         db.execute(text("""
-            INSERT INTO user_results (test_id, user_id, total_score, created_at)
-            VALUES (:test_id, :user_id, :total_score, :created_at)
-        """), {"test_id": test_id, "user_id": user_id, "total_score": result["score"], "created_at": result["created_at"]})
+            INSERT INTO user_results (test_id, user_id, total_score, result_text, created_at)
+            VALUES (:test_id, :user_id, :total_score,:result_text, :created_at)
+        """), {"test_id": test_id, "user_id": user_id, "total_score": result["score"], "result_text": result_text,  "created_at": result["created_at"]})
         db.commit()
         
         return {"message": "Test estimated successfully", "result": result}
@@ -389,14 +410,25 @@ def estimate_test(
         db.rollback()
         raise HTTPException(status_code=500, detail=str(e))
 @app.post("/ask-ai")
-def ask_ai(request: PromptRequest, user: dict = Depends(get_current_user)):
+def ask_ai(request: PromptRequest, user: dict = Depends(get_current_user), db: Session = Depends(get_db)):
     try:
-        user_id = user["user_id"]
+        username = user["user_id"]
         prompt = request.prompt
+      
         with engine.connect() as conn:
-            print("Prompt:", prompt)
-            response = get_response(prompt)     
-            
+            user = db.execute(text("SELECT * FROM users WHERE username = :username"), {"username": username}).fetchone()
+        
+            user_id = user[0] 
+           
+            context = db.execute(text("SELECT * FROM messages WHERE user_id = :user_id"), {"user_id": user_id}).fetchall()
+            prompts = []
+            for message in context:
+                prompts.append(message[2])
+            prompts.append(prompt)    
+            response = get_response(prompts)     
+            db.execute(text("INSERT INTO messages (user_id, content, created_at) VALUES (:user_id, :content, CURRENT_TIMESTAMP)"),
+                     {"user_id": user_id, "content": prompt})
+            db.commit()
             print(response)       
             return {"response": response}
     except Exception as e:
